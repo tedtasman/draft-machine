@@ -1,5 +1,6 @@
-from bs4 import BeautifulSoup
 import sys
+
+from bs4 import BeautifulSoup
 
 EXTRAS = ["Player", "NO.", "Team"]
 
@@ -9,10 +10,10 @@ def extract_visible_text(html):
     texts = []
     for element in soup.find_all(text=True):
         # Skip script, style, head, title, meta, [hidden]
-        if element.parent.name in ['script', 'style', 'head', 'title', 'meta', '[document]']:
+        if element.parent.name in ['script', 'style', 'head', 'title', 'meta', '[document]']: # type: ignore
             continue
-        if element.strip():
-            texts.append(element.strip().replace(',', '').replace('"', ''))
+        if element.strip(): # type: ignore
+            texts.append(element.strip().replace(',', '').replace('"', '')) # type: ignore
     return texts
 
 def convert_to_csv(texts, output_file):

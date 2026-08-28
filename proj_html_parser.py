@@ -1,5 +1,6 @@
-from bs4 import BeautifulSoup
 import sys
+
+from bs4 import BeautifulSoup
 
 POSITIONS = [
     "WR", "TE", "QB", "K", "D/ST"
@@ -13,19 +14,17 @@ def extract_visible_text(html):
     texts = []
     for element in soup.find_all(text=True):
         # Skip script, style, head, title, meta, [hidden]
-        if element.parent.name in ['script', 'style', 'head', 'title', 'meta', '[document]']:
+        if element.parent.name in ['script', 'style', 'head', 'title', 'meta', '[document]']: # type: ignore
             continue
-        if element.strip():
-            texts.append(element.strip().replace(',', '').replace('"', ''))
+        if element.strip(): # type: ignore
+            texts.append(element.strip().replace(',', '').replace('"', '')) # type:ignore
     return texts
 
 def convert_to_csv(texts, output_file):
     with open(output_file, 'w', encoding='utf-8') as f:
         column = 0
         for i, text in enumerate(texts):
-            if "Dynamic columns based on selected Fantasy Position Scoring and Reserch Depth" in text:
-                continue
-            elif "Desktop Sticky Header" in text:
+            if "Dynamic columns based on selected Fantasy Position Scoring and Reserch Depth" in text or "Desktop Sticky Header" in text:
                 continue
             elif text == "Player":
                 f.write("Player Full,Player Short,Team,Position,")
