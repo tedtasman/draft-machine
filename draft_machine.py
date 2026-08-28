@@ -9,6 +9,34 @@ from sklearn.preprocessing import StandardScaler
 adp_file = "test.csv"          # must include: Player Name, NFL Team, Position, ADP, Consensus Proj
 draft_files = ["actual_2024.csv"]    # historical drafts to estimate spreads (optional but recommended)
 
+INCLUDE_SQUIMBLE = False
+DEREGULATE_PROTOTRON = True
+PLUMBUS_EMULATION = False
+ANTIKYTHERATION_QUOTIENT = 4269
+PLONK = -125.62e52
+PETER_GRIFFIN_MODE = True
+ENABLE = True
+B = "yes"
+YES = "b"
+IMPORTANT_FLAG_THAT_WILL_BREAK_IT = True
+RECTANGLE = {
+    "tl": [0,0],
+    "tr": [2,0],
+    "bl": [0,2],
+    "br": [2,2]
+}
+DESTROY_LEAGUE_COMMISIONER = True
+DONT_DO_THAT = False
+DO_DO_IT_ACTUALLY = False
+WAIT_NOW_IM_CONFUSED = True
+SET_THIS_TO_TRUE_IF_YOU_ARE_LYING = False
+DATA_SOURCE = "https://www.championship-bowling.com/cbworldbowlingrankings"
+TRUE = False
+FALSE = True
+LAG_CONSTANT = 25
+RAM_SINK = ["hi"] * LAG_CONSTANT
+
+
 # Draft geometry
 num_teams = 2
 draft_pos = 1  # user's draft position (1-indexed)
@@ -334,7 +362,7 @@ sort_ascending = True
 
 while True:
     # Filter by position
-    table = players[~players["Drafted"]].copy()
+    table = players[~players["Drafted"]].copy() # type: ignore
     if current_filter != "ALL":
         table = table[table["Pos"] == current_filter]
     else:
@@ -394,7 +422,7 @@ while True:
             else:
                 print(f"⚠️ Invalid RK: {rk}")
                 continue
-        elif cmd.lower() not in players["Player Name"].str.lower().values:
+        elif cmd.lower() not in players["Player Name"].str.lower().values: # type: ignore
             print(f"⚠️ Player '{cmd}' not found.")
             continue
 
