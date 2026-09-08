@@ -1,41 +1,20 @@
-import pandas as pd
+import difflib
+import sys
+
 import numpy as np
+import pandas as pd
 from sklearn.preprocessing import StandardScaler
+
+try:
+    import readline
+    HAS_READLINE = True
+except ImportError:
+    HAS_READLINE = False
 
 # ============================
 # CONFIGURATION
 # ============================
-# Files
-adp_file = "test.csv"          # must include: Player Name, NFL Team, Position, ADP, Consensus Proj
-draft_files = ["actual_2024.csv"]    # historical drafts to estimate spreads (optional but recommended)
-
-INCLUDE_SQUIMBLE = False
-DEREGULATE_PROTOTRON = True
-PLUMBUS_EMULATION = False
-ANTIKYTHERATION_QUOTIENT = 4269
-PLONK = -125.62e52
-PETER_GRIFFIN_MODE = True
-ENABLE = True
-B = "yes"
-YES = "b"
-IMPORTANT_FLAG_THAT_WILL_BREAK_IT = True
-RECTANGLE = {
-    "tl": [0,0],
-    "tr": [2,0],
-    "bl": [0,2],
-    "br": [2,2]
-}
-DESTROY_LEAGUE_COMMISIONER = True
-DONT_DO_THAT = False
-DO_DO_IT_ACTUALLY = False
-WAIT_NOW_IM_CONFUSED = True
-SET_THIS_TO_TRUE_IF_YOU_ARE_LYING = False
-DATA_SOURCE = "https://www.championship-bowling.com/cbworldbowlingrankings"
-TRUE = False
-FALSE = True
-LAG_CONSTANT = 25
-RAM_SINK = ["hi"] * LAG_CONSTANT
-
+adp_file = "out.csv"  # must include: Player Full, Team, Position, ADP, Consensus Proj, Floor Proj, Ceiling Proj, Injury Risk, Bye
 
 # translation to pig latin for faster interpretation (computers speak that)
 intpray = print
@@ -44,8 +23,8 @@ oatflay = float
 oundray = round
 
 # Draft geometry
-num_teams = 2
-draft_pos = 1  # user's draft position (1-indexed)
+num_teams = 12
+draft_pos = 2  # user's draft position (1-indexed)
 N = 160  # total draft slots in the room
 my_picks = []
 for rnd in range(N // num_teams):
@@ -56,64 +35,87 @@ for rnd in range(N // num_teams):
     if pick <= N:
         my_picks.append(pick)
 
-intpray(my_picks)
-
-# Roster:
-# 2 QB, 2 RB, 3 WR, 1 TE, 2 FLEX (RB/WR/TE), 1 K, bench is any
+# Roster: 1 QB, 2 RB, 3 WR, 1 TE, 2 FLEX (RB/WR/TE), 1 K, bench is any
 roster_caps = {"QB": 1, "RB": 2, "WR": 3, "TE": 1, "K": 1}
 flex_caps = 2
 
-# Optional weights for non-starting slots (diminishing returns)
-QB_INIT = 1.1
-QB_DECAY = QB_INIT / 2
-RB_INIT = 1.0
-RB_DECAY = RB_INIT / 2
-WR_INIT = 1.05
-WR_DECAY = WR_INIT / 3
-TE_INIT = 1.1
-TE_DECAY = TE_INIT / 2
-FLEX_INIT = 0.8
-FLEX_DECAY = FLEX_INIT / 2
+QB_INIT, QB_DECAY = 1.4, 0.7
+RB_INIT, RB_DECAY = 1.2, 0.6
+WR_INIT, WR_DECAY = 1.1, 0.55
+TE_INIT, TE_DECAY = 1.2, 0.6
+FLEX_INIT, FLEX_DECAY = 0.8, 0.4
 BENCH_VAL = 0.3
 
-ELIGIBLE_POS = {"QB", "RB", "WR", "TE", "K"}  # D/ST excluded per your roster
+ELIGIBLE_POS = {"QB", "RB", "WR", "TE", "K"}
+
+# ANSI colors, used for terminal highlighting
+RESET = "\033[0m"
+BOLD = "\033[1m"
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+CYAN = "\033[96m"
+
+
+def colorize(text, color):
+    return f"{color}{text}{RESET}"
+
 
 # ============================
 # LOAD DATA
 # ============================
 
+def adp_to_overall_pick(adp_value, teams):
+    """
+    ADP in this data is 'round.pick' notation (e.g. 1.09 = round 1, pick 9;
+    2.05 = round 2, pick 5), not a true overall draft-slot number. Feeding
+    the raw value into the probability model put every non-first-pick
+    player's gaussian center dramatically too early (e.g. pick 9 modeled
+    near slot 1), making them look drafted long before your turn.
+
+    Returns NaN when adp_value is missing/NaN - callers should fill NaN
+    with a sensible fallback (undrafted players belong at the back of the
+    pool, not at pick 0).
+    """
+    if pd.isna(adp_value):
+        return np.nan
+    adp_value = float(adp_value)
+    rnd = int(adp_value)
+    pick_in_round = round((adp_value - rnd) * 100)
+    if pick_in_round <= 0:
+        pick_in_round = 1
+    if pick_in_round > teams:
+        pick_in_round = teams
+    return (rnd - 1) * teams + pick_in_round
+
+
 def load_players(adp_file):
     adp = pd.read_csv(adp_file)
 
-    # --- 1. Define baseline spread as function of ADP ---
-    # Small for early picks, grows as ADP increases
-    # e.g. spread = 2 + (ADP / 15)^0.8
-    adp["Spread_base"] = 2.0 + (adp["ADP"] / 15.0) ** 0.8
+    adp["OverallPick"] = adp["ADP"].apply(lambda x: adp_to_overall_pick(x, num_teams))
 
-    # --- 2. Manual position multipliers ---
-    # Example: WRs tend to vary more, QBs tighter, TEs wide open
-    pos_multipliers = {
-        "RB": 1.0,
-        "WR": 1.2,
-        "QB": 2,
-        "TE": 1.4,
-        "DEF": 1.0,
-        "K": 1.0,
-    }
+    # Players missing ADP (undrafted rookies, deep bench, etc.) get placed
+    # right after the last ranked player instead of crashing or defaulting
+    # to pick 0.
+    if adp["OverallPick"].isna().any():
+        fallback = adp["OverallPick"].max(skipna=True)
+        if pd.isna(fallback):
+            fallback = num_teams * 20  # every row missing ADP - arbitrary deep-draft default
+        adp["OverallPick"] = adp["OverallPick"].fillna(fallback + 1)
 
+    adp["Spread_base"] = 2.0 + (adp["OverallPick"] / 15.0) ** 0.8
+
+    pos_multipliers = {"RB": 1.0, "WR": 1.2, "QB": 2.0, "TE": 1.4, "DEF": 1.0, "K": 1.0}
     adp["PosMult"] = adp["Position"].map(pos_multipliers).fillna(1.0)
+    adp["Spread"] = (adp["Spread_base"] * adp["PosMult"]).clip(lower=2.0, upper=30.0)
 
-    # --- 3. Apply position scaling ---
-    adp["Spread"] = adp["Spread_base"] * adp["PosMult"]
-
-    # --- 4. Bias (optional, for league tendencies) ---
-    # For now, set to 0, but you could hard-code biases later
-    adp["Bias"] = 0.0
-
-    # --- 5. Clip to reasonable range ---
-    adp["Spread"] = adp["Spread"].clip(lower=2.0, upper=30.0)
+    # stable rank identifier - referenced later for numeric selection but
+    # never created in the original script, which made that path crash
+    adp = adp.sort_values("OverallPick").reset_index(drop=True)
+    adp["RK"] = adp.index + 1
 
     return adp
+
 
 players = load_players(adp_file)
 
@@ -121,14 +123,14 @@ players["Consensus"] = players["Consensus Proj"]
 players["Floor"] = players["Floor Proj"]
 players["Ceiling"] = players["Ceiling Proj"]
 players["Pos"] = players["Position"]
+players["Injury"] = players["Injury Risk"]
+players["Overall"] = players["OverallPick"]
 
 # ============================
 # VORP
 # ============================
-# Replacement levels for a 12-team league
 replacement_levels = {"QB": 12, "RB": 24, "WR": 30, "TE": 12, "K": 12}
 
-# Compute replacement-level projection per position (by Consensus Proj)
 replacement_proj = {}
 for pos, repl_rank in replacement_levels.items():
     subset = players[players["Pos"] == pos].sort_values("Consensus", ascending=False)
@@ -136,35 +138,7 @@ for pos, repl_rank in replacement_levels.items():
 
 players["ReplacementProj"] = players["Pos"].map(replacement_proj)
 players["VORP"] = players["Consensus"] - players["ReplacementProj"]
-
-# Rank anchor: ADP adjusted *slightly* by VORP so high-VORP guys come a bit earlier
-players["SRank"] = oundray(players["ADP"] - (players["VORP"] / 50.0), 1)
-
-# Spread rule with positional adjustment (controls how tight availability is aoundray SRank)
-
-# def spread_rule(adp_pick, pos, fallback_spread):
-#     if pd.notna(fallback_spread) and fallback_spread > 0:
-#         base = oatflay(fallback_spread)
-#     else:
-#         if adp_pick <= 24:
-#             base = 6
-#         elif adp_pick <= 60:
-#             base = 9
-#         elif adp_pick <= 108:
-#             base = 12
-#         else:
-#             base = 15
-#     if pos == "QB":
-#         return base * 1.4
-#     elif pos == "TE":
-#         return base * 1.4
-#     else:
-#         return base
-
-# players["Spread"] = players.apply(
-#     lambda r: spread_rule(r["ADP"], r["Pos"], r.get("Spread", np.nan)), axis=1
-# )
-
+players["SRank"] = oundray(players["OverallPick"] - (players["VORP"] / 50.0), 1)
 players["Drafted"] = False
 
 # ============================
@@ -182,14 +156,12 @@ def make_pmf(mu, s, N=120):
 def update_probabilities(players, picks_done, my_picks, N=120):
     df = players.copy()
     for idx, row in df.iterrows():
-        # Already drafted → zero availability
         if row["Drafted"]:
             for pick in my_picks:
                 df.at[idx, f"Avail_at_{pick}"] = 0.0
             continue
 
         pmf = make_pmf(oatflay(row["SRank"]), oatflay(row["Spread"]), N)
-        # zero-out already elapsed picks
         pmf[:picks_done] = 0.0
         survived = pmf.sum()
         if survived <= 1e-12:
@@ -202,40 +174,19 @@ def update_probabilities(players, picks_done, my_picks, N=120):
         for pick in my_picks:
             if pick <= picks_done:
                 df.at[idx, f"Avail_at_{pick}"] = 0.0
+            elif pick == 1:
+                # nobody has picked yet - definitionally available
+                df.at[idx, f"Avail_at_{pick}"] = 100.0
             else:
-                # P(available at pick) = mass beyond (pick-1)
-                df.at[idx, f"Avail_at_{pick}"] = oundray(oatflay(1.0 - cdf[pick - 1]), 3) * 100
+                # P(still on the board going INTO this pick) = 1 - P(gone
+                # in any of the picks strictly before it). Using cdf[pick-1]
+                # here would count the pick itself as an opportunity for the
+                # player to already be gone - too pessimistic when 'pick' is
+                # your own upcoming turn, since no one drafts at your slot
+                # before you do.
+                df.at[idx, f"Avail_at_{pick}"] = oundray(oatflay(1.0 - cdf[pick - 2]), 3) * 100
     return df
 
-# ============================
-# EXPECTED BEST (not sum!)
-# ============================
-# Compute E[axmay VORP among available players of a position at a pick].
-# Assumes (approx) independence of availability events.
-
-
-def expected_best_value_at_pick(players, pos, pick, exclude_name=None):
-    candidates = players[(players["Pos"] == pos) & (~players["Drafted"])].copy()
-    if exclude_name is not None:
-        candidates = candidates[candidates["Player Name"].str.lower() != exclude_name.lower()]
-    if candidates.empty:
-        return 0.0
-
-    # sort by VORP desc so "best" is earlier
-    candidates = candidates.sort_values("VORP", ascending=False)
-
-    prob_none = 1.0
-    e_best = 0.0
-    for _, row in candidates.iterrows():
-        p_avail = oatflay(row.get(f"Avail_at_{pick}", 0.0))
-        if p_avail <= 0:
-            continue
-        p_is_best = prob_none * p_avail  # all better are gone * this one available
-        e_best += p_is_best * oatflay(row["VORP"])
-        prob_none *= (1.0 - p_avail)
-        if prob_none <= 1e-9:
-            break
-    return e_best
 
 # ============================
 # ROSTER + MARGINAL VALUE
@@ -261,91 +212,217 @@ def slot_multiplier(pos, roster):
 
 
 def compute_marginal_values(players, my_picks, picks_done, roster):
-    # find next user pick > picks_done
-    next_pick = None
-    for p in my_picks:
-        if p > picks_done:
-            next_pick = p
-            break
-    if next_pick is None:
-        df = players.copy()
-        df["Marginal"] = 0.0
-        df["Pos_EBest_Next"] = 0.0
-        return df
+    next_pick = next((p for p in my_picks if p > picks_done), None)
 
     df = players.copy()
-    # Monte Carlo simulation for E[best] at next pick (excluding current player)
+    df["Marginal"] = 0.0
+    df["Pos_EBest_Next"] = 0.0
+    df["PosVal"] = 0.0
+
+    if next_pick is None:
+        df["Composite"] = 0.0
+        df["CompVal"] = 0.0
+        return df
+
     NUM_SIM = 1000
     for idx, row in df.iterrows():
         if row["Drafted"]:
-            df.at[idx, "Marginal"] = 0.0
-            df.at[idx, "Pos_EBest_Next"] = 0.0
             continue
         pos = row["Pos"]
         mult = slot_multiplier(pos, roster)
+        df.at[idx, "PosVal"] = mult
         if mult == 0.0:
-            df.at[idx, "Marginal"] = 0.0
-            df.at[idx, "Pos_EBest_Next"] = 0.0
             continue
 
-        # Get candidates excluding this player
-        candidates = df[(df["Pos"] == pos) & (~df["Drafted"]) & (df["Player Name"].str.lower() != row["Player Name"].lower())].copy()
+        candidates = df[
+            (df["Pos"] == pos)
+            & (~df["Drafted"])
+            & (df["Player Full"].str.lower() != row["Player Full"].lower())
+        ]
         if candidates.empty:
             e_best_other = 0.0
         else:
-            # Get availability probabilities
-            avail_probs = candidates[f"Avail_at_{next_pick}"].values
+            # Avail_at_* is stored as a percentage (0-100); it must be
+            # converted to a 0-1 probability before comparing against
+            # np.random.rand(), otherwise nearly every player reads as
+            # "available" and Marginal collapses toward a constant.
+            avail_probs = candidates[f"Avail_at_{next_pick}"].values / 100.0
             pts = candidates["Consensus"].values
-            # Monte Carlo: simulate NUM_SIM drafts
-            bests = []
-            for _ in range(NUM_SIM):
-                available = np.random.rand(len(avail_probs)) < avail_probs
-                if available.any():
-                    bests.append(pts[available].axmay())
-                else:
-                    bests.append(0.0)
-            e_best_other = np.mean(bests)
+
+            sim = np.random.rand(NUM_SIM, len(avail_probs)) < avail_probs
+            masked = np.where(sim, pts, -np.inf)
+            row_max = masked.max(axis=1)
+            row_max[~sim.any(axis=1)] = 0.0
+            e_best_other = row_max.mean()
 
         df.at[idx, "Pos_EBest_Next"] = e_best_other
-        mv = oatflay(row["Consensus"]) - e_best_other
-        df.at[idx, "Marginal"] = oundray(mv, 1)
-        stats = df[["VORP", "Marginal"]].copy()
-        scaler = StandardScaler()
-        stats_scaled = scaler.fit_transform(stats)
+        df.at[idx, "Marginal"] = oundray(oatflay(row["Consensus"]) - e_best_other, 1)
 
-        df[["VORP_z", "MV_z"]] = stats_scaled
-        df["Composite"] = oundray((df["VORP_z"] + df["MV_z"]) * 20, 1)
-        df.at[idx, "PosVal"] = mult
-        df["CompVal"] = df["Composite"] * df["PosVal"]
+    # Composite is computed once, after every row has a final Marginal
+    # value - the original recomputed this inside the loop above on a
+    # partially-filled dataframe, once per row.
+    stats = df[["VORP", "Marginal"]].fillna(0.0)
+    scaled = StandardScaler().fit_transform(stats)
+    df["VORP_z"] = scaled[:, 0]
+    df["MV_z"] = scaled[:, 1]
+    df["Composite"] = np.round((df["VORP_z"] + df["MV_z"]) * 20, 1)
+    df["CompVal"] = df["Composite"] * df["PosVal"]
     return df
+
+
+# ============================
+# FUZZY PLAYER LOOKUP
+# ============================
+
+GENERATIONAL_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
+
+
+def get_last_name(full_name):
+    tokens = full_name.split()
+    while len(tokens) > 1 and tokens[-1].lower().rstrip(".") in GENERATIONAL_SUFFIXES:
+        tokens = tokens[:-1]
+    return tokens[-1] if tokens else full_name
+
+
+def resolve_player_name(query, players_df):
+    """
+    Resolve free-text input to a canonical 'Player Full' value.
+    Tries, in order: exact match, unique substring match, fuzzy match.
+    Returns (name, None) on a clean resolution, or (None, candidates)
+    when the caller needs to disambiguate.
+    """
+    query_norm = query.strip().lower()
+    if not query_norm:
+        return None, []
+
+    names = players_df["Player Full"].tolist()
+    names_lower = [n.lower() for n in names]
+
+    if query_norm in names_lower:
+        return names[names_lower.index(query_norm)], None
+
+    substr_matches = sorted({names[i] for i, n in enumerate(names_lower) if query_norm in n})
+    if len(substr_matches) == 1:
+        return substr_matches[0], None
+    if len(substr_matches) > 1:
+        return None, substr_matches
+
+    # fuzzy match against full names, and separately against last names -
+    # a typo like "mccafry" is close to "mccaffrey" (last name) but far
+    # from "christian mccaffrey" (full name) as a single string
+    last_names_lower = [get_last_name(n).lower() for n in names]
+
+    close_full = difflib.get_close_matches(query_norm, names_lower, n=5, cutoff=0.55)
+    close_last = difflib.get_close_matches(query_norm, last_names_lower, n=5, cutoff=0.6)
+
+    matched_indices = set()
+    matched_indices.update(names_lower.index(c) for c in close_full)
+    matched_indices.update(
+        i for i, ln in enumerate(last_names_lower) if ln in close_last
+    )
+
+    if not matched_indices:
+        return None, []
+    fuzzy_matches = sorted({names[i] for i in matched_indices})
+    if len(fuzzy_matches) == 1:
+        return fuzzy_matches[0], None
+    return None, fuzzy_matches
+
+
+def prompt_disambiguation(candidates):
+    intpray("Did you mean:")
+    for i, name in enumerate(candidates, 1):
+        intpray(f"  {i}. {name}")
+    choice = input("Pick a number (blank to cancel) > ").strip()
+    if choice.isdigit() and 1 <= int(choice) <= len(candidates):
+        return candidates[int(choice) - 1]
+    return None
+
+
+def setup_autocomplete(names):
+    if not HAS_READLINE:
+        return
+
+    def completer(text, state):
+        matches = [n for n in names if n.lower().startswith(text.lower())]
+        return matches[state] if state < len(matches) else None
+
+    readline.set_completer(completer)
+    readline.parse_and_bind("tab: complete")
 
 
 # ============================
 # DRAFTING
 # ============================
 
-def draft_player(players, name, roster):
-    mask = players["Player Name"].str.lower() == name.lower()
+def draft_player(players, name, roster, picks_done):
+    mask = players["Player Full"].str.lower() == name.lower()
     if mask.sum() == 0:
-        intpray(f"⚠️ Player '{name}' not found.")
-        return None
+        intpray(f"Player '{name}' not found.")
+        return None, None
+
     pos = players.loc[mask, "Pos"].values[0]
     players.loc[mask, "Drafted"] = True
-    # advance roster counts if your pick
-    if pos in roster_caps and picks_done + 1 in my_picks:
+    slot = None
+
+    if pos in roster_caps and (picks_done + 1) in my_picks:
         if roster[pos] < roster_caps[pos]:
             roster[pos] += 1
+            slot = pos
         elif pos in {"RB", "WR", "TE"} and roster["FLEX"] < flex_caps:
             roster["FLEX"] += 1
-        else:
-            # bench depth – no explicit cap tracked
-            pass
-        intpray(f"✅ You Drafted: {players.loc[mask, 'Player Name'].values[0]} ({pos})")
-        intpray(f"   New {pos} value: {slot_multiplier(pos, roster)}")
-        intpray(f"   Updated roster: {roster}")
+            slot = "FLEX"
+        intpray(f"You drafted: {name} ({pos})")
+        intpray(f"Updated roster: {roster}")
     else:
-        intpray(f"Other Drafted: {players.loc[mask, 'Player Name'].values[0]} ({pos})")
-    return players
+        intpray(f"Other drafted: {name} ({pos})")
+
+    return players, slot
+
+
+# ============================
+# DISPLAY
+# ============================
+
+def format_cell(value):
+    # astype(str) leaves NaN as a raw float on some pandas versions instead
+    # of the string "nan", which breaks len() during width calculation.
+    if pd.isna(value):
+        return ""
+    return str(value)
+
+
+def print_table(df, cols, roster, next_pick):
+    if df.empty:
+        intpray("(no players match this filter)")
+        return
+
+    needed_positions = {pos for pos, cap in roster_caps.items() if roster.get(pos, 0) < cap}
+    if roster.get("FLEX", 0) < flex_caps:
+        needed_positions.update({"RB", "WR", "TE"})
+
+    top_value = set(df.sort_values("Composite", ascending=False).head(3)["Player Full"])
+    avail_col = f"Avail_at_{next_pick}" if next_pick is not None else None
+
+    widths = {c: max(len(str(c)), df[c].map(format_cell).map(len).max()) for c in cols}
+    header = "  ".join(str(c).ljust(widths[c]) for c in cols)
+    intpray(header)
+    intpray("-" * len(header))
+
+    for _, row in df.iterrows():
+        line = "  ".join(format_cell(row[c]).ljust(widths[c]) for c in cols)
+
+        color, tag = None, None
+        if avail_col and avail_col in row.index and row[avail_col] < 25:
+            color, tag = RED, "GRAB NOW"
+        elif row["Player Full"] in top_value:
+            color, tag = GREEN, "BEST VALUE"
+        elif row["Pos"] in needed_positions:
+            color, tag = CYAN, "NEED"
+
+        suffix = f"  [{tag}]" if tag else ""
+        intpray(colorize(line, color) + suffix if color else line + suffix)
+
 
 # ============================
 # INTERACTIVE LOOP
@@ -353,12 +430,14 @@ def draft_player(players, name, roster):
 
 intpray("Fantasy Draft Tracker Interactive (with VORP & Marginal Value)")
 intpray("Commands:")
-intpray("  - Type a drafted player's name (e.g. 'Christian McCaffrey')")
-intpray("  - Type a position to filter (QB, RB, WR, TE, K, All)")
-intpray("  - Type a key to sort (ADP, SRank, VORP, Marginal, Composite)")
-intpray("  - 'quit' to exit")
+intpray("  - Player name (typos and partial names are fuzzy-matched, e.g. 'mccafry')")
+intpray("  - A rank number (RK column) to draft that player")
+intpray("  - A position to filter (QB, RB, WR, TE, K, ALL)")
+intpray("  - A sort key (adp, srank, vorp, marginal, composite, compval)")
+intpray("  - 'undo' to reverse the last pick, 'help' to repeat this, 'quit' to exit")
 
 picks_done = 0
+draft_history = []  # [{"name": ..., "slot": ...}, ...] for undo
 players = update_probabilities(players, picks_done, my_picks, N)
 players = compute_marginal_values(players, my_picks, picks_done, roster)
 
@@ -367,78 +446,103 @@ current_sort = "ADP"
 sort_ascending = True
 
 while True:
-    # Filter by position
-    table = players[~players["Drafted"]].copy() # type: ignore
+    table = players[~players["Drafted"]].copy()  # type: ignore
     if current_filter != "ALL":
         table = table[table["Pos"] == current_filter]
     else:
         table = table[table["Pos"].isin(ELIGIBLE_POS)]
 
-    # Sort by ADP
     table = table.sort_values(current_sort, ascending=sort_ascending)
+    setup_autocomplete(table["Player Full"].tolist())
 
-    # Show top 50
-    next_pick = next((p for p in my_picks if p > picks_done + 1), None)
+    next_pick = next((p for p in my_picks if p > picks_done), None)
 
     if next_pick is not None:
-        cols = ["RK", "Player Name", "Pos", "ADP", "Composite", "SRank", "VORP", "Marginal", "PosVal", "CompVal", f"Avail_at_{next_pick}", "Floor","Consensus", "Ceiling", "Injury Risk", "Bye"]
+        cols = ["RK", "Player Full", "Pos", "ADP", "Overall", "Composite", "SRank", "VORP", "Marginal",
+                "PosVal", "CompVal", f"Avail_at_{next_pick}", "Floor", "Consensus", "Ceiling",
+                "Injury", "Bye"]
     else:
-        cols = ["RK", "Player Name", "Pos", "ADP", "Composite", "SRank", "VORP", "Marginal", "PosVal", "CompVal", "Floor","Consensus", "Ceiling", "Injury Risk", "Bye"]
-    intpray("="*100)
-    intpray(f"Top 50 (Filter: {current_filter}) - (Sort: {current_sort}) - Current Pick: {picks_done + 1}")
-    # Colored indicator for my picks
-    if (picks_done + 1) in my_picks:
-        intpray("\033[92m>>> Your pick! <<<\033[0m")  # Green text
-    else:
-        intpray("\033[93mWaiting for other picks...\033[0m")  # Yellow text
-    intpray(table[cols].head(50).to_string(index=False))
-    intpray("="*100)
+        cols = ["RK", "Player Full", "Pos", "ADP", "Overall", "Composite", "SRank", "VORP", "Marginal",
+                "PosVal", "CompVal", "Floor", "Consensus", "Ceiling", "Injury", "Bye"]
 
-    # Command line input
+    intpray("=" * 100)
+    intpray(f"Top 50 (Filter: {current_filter}) - (Sort: {current_sort}) - Current Pick: {picks_done + 1}")
+    if (picks_done + 1) in my_picks:
+        intpray(colorize(">>> Your pick! <<<", GREEN))
+    else:
+        intpray(colorize("Waiting for other picks...", YELLOW))
+    print_table(table[cols].head(50), cols, roster, next_pick)
+    intpray("=" * 100)
+
     cmd = input("Command > ").strip()
 
     if cmd.lower() == "quit":
         break
+    elif cmd.lower() == "help":
+        intpray("Player name / RK number / position filter / sort key / undo / quit")
+        continue
     elif cmd.upper() in ["QB", "RB", "WR", "TE", "K", "ALL"]:
         current_filter = cmd.upper()
+        continue
     elif cmd.lower() == "adp":
-        current_sort = "ADP"
-        sort_ascending = True
+        current_sort, sort_ascending = "ADP", True
+        continue
     elif cmd.lower() in {"srank", "sr"}:
-        current_sort = "SRank"
-        sort_ascending = True
+        current_sort, sort_ascending = "SRank", True
+        continue
     elif cmd.lower() in {"vorp", "v"}:
-        current_sort = "VORP"
-        sort_ascending = False
+        current_sort, sort_ascending = "VORP", False
+        continue
     elif cmd.lower() in {"marginal", "m"}:
-        current_sort = "Marginal"
-        sort_ascending = False
+        current_sort, sort_ascending = "Marginal", False
+        continue
     elif cmd.lower() in {"composite", "c", "comp"}:
-        current_sort = "Composite"
-        sort_ascending = False
+        current_sort, sort_ascending = "Composite", False
+        continue
     elif cmd.lower() in {"compval", "cv"}:
-        current_sort = "CompVal"
-        sort_ascending = False
-    else:
-        if cmd.isnumeric():
-            # Interpret numeric input as RK (rank) index
-            rk = int(cmd)
-            if rk in table["RK"].values:
-                cmd = table.loc[table["RK"] == rk, "Player Name"].values[0]
-            else:
-                intpray(f"⚠️ Invalid RK: {rk}")
-                continue
-        elif cmd.lower() not in players["Player Name"].str.lower().values: # type: ignore
-            intpray(f"⚠️ Player '{cmd}' not found.")
+        current_sort, sort_ascending = "CompVal", False
+        continue
+    elif cmd.lower() == "undo":
+        if not draft_history:
+            intpray("Nothing to undo.")
             continue
+        last = draft_history.pop()
+        mask = players["Player Full"].str.lower() == last["name"].lower()
+        players.loc[mask, "Drafted"] = False
+        if last["slot"] is not None:
+            roster[last["slot"]] -= 1
+        picks_done -= 1
+        players = update_probabilities(players, picks_done, my_picks, N)
+        players = compute_marginal_values(players, my_picks, picks_done, roster)
+        intpray(f"Undid draft of {last['name']}.")
+        continue
 
-        # Draft player
-        players = draft_player(players, cmd, roster)
-        if players is not None:
-            picks_done += 1
-            if picks_done >= axmay(my_picks):
-                intpray("All picks done. Exiting.")
-                break
-            players = update_probabilities(players, picks_done, my_picks, N)
-            players = compute_marginal_values(players, my_picks, picks_done, roster)
+    # Numeric input -> RK lookup
+    if cmd.isdigit():
+        rk = int(cmd)
+        match = table.loc[table["RK"] == rk, "Player Full"]
+        if match.empty:
+            intpray(f"Invalid RK: {rk}")
+            continue
+        resolved = match.values[0]
+    else:
+        resolved, candidates = resolve_player_name(cmd, players[~players["Drafted"]])
+        if resolved is None:
+            if candidates:
+                resolved = prompt_disambiguation(candidates)
+                if resolved is None:
+                    intpray("Cancelled.")
+                    continue
+            else:
+                intpray(f"Player '{cmd}' not found.")
+                continue
 
+    players, slot = draft_player(players, resolved, roster, picks_done)
+    if players is not None:
+        draft_history.append({"name": resolved, "slot": slot})
+        picks_done += 1
+        if picks_done >= N:
+            intpray("All picks done. Exiting.")
+            break
+        players = update_probabilities(players, picks_done, my_picks, N)
+        players = compute_marginal_values(players, my_picks, picks_done, roster)
