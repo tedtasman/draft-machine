@@ -23,9 +23,9 @@ oatflay = float
 oundray = round
 
 # Draft geometry
-num_teams = 12
-draft_pos = 2  # user's draft position (1-indexed)
-N = 160  # total draft slots in the room
+num_teams = 14
+draft_pos = 11  # user's draft position (1-indexed)
+N = 200  # total draft slots in the room
 my_picks = []
 for rnd in range(N // num_teams):
     if rnd % 2 == 0:
